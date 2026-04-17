@@ -34,74 +34,85 @@ io.on('connection', (socket) => {
     socket.on('joinRoom', ({ username, room }) => {
         socket.join(room);
         if (!rooms[room]) {
-            rooms[room] = { 
-                players: [], 
-                deck: createDeck(), 
-                discard: [], 
-                turn: 0, 
-                gameStarted: false,
-                lastRound: false,
-                winner: null
-            };
+            rooms[room] = { players: [], deck: [], discard: [], turn: 0, gameStarted: false, lastRound: false };
         }
-        
         if (rooms[room].players.length < 6) {
-            rooms[room].players.push({
-                id: socket.id,
-                username,
-                cards: [],
-                hasSaidCambio: false,
-                revealedInitial: false
-            });
+            rooms[room].players.push({ id: socket.id, username, cards: [], hasSaidCambio: false });
         }
-
         io.to(room).emit('updatePlayers', rooms[room].players);
     });
 
     socket.on('startGame', (room) => {
         let game = rooms[room];
-        if (game) {
-            game.gameStarted = true;
-            game.deck = createDeck();
-            // Repartir 6 cartas a cada uno
-            game.players.forEach(p => {
-                p.cards = game.deck.splice(0, 6);
-            });
-            game.discard.push(game.deck.pop());
-            io.to(room).emit('initGame', {
-                players: game.players,
-                discard: game.discard[game.discard.length - 1]
-            });
-        }
+        game.gameStarted = true;
+        game.deck = createDeck();
+        game.players.forEach(p => p.cards = game.deck.splice(0, 6));
+        game.discard = [game.deck.pop()];
+        io.to(room).emit('initGame', { players: game.players, discard: game.discard[game.discard.length - 1], turn: game.turn });
     });
 
-    // Lógica de descarte fuera de turno
+    socket.on('drawCard', (room) => {
+        let game = rooms[room];
+        if (game.players[game.turn].id !== socket.id) return;
+        
+        if (game.deck.length === 0) {
+            let topDiscard = game.discard.pop();
+            game.deck = game.discard.sort(() => Math.random() - 0.5);
+            game.discard = [topDiscard];
+        }
+
+        const card = game.deck.pop();
+        socket.emit('cardDrawn', card);
+    });
+
+    socket.on('playTurn', ({ room, action, cardIndex, drawnCard }) => {
+        let game = rooms[room];
+        let player = game.players[game.turn];
+
+        if (action === 'replace') {
+            const oldCard = player.cards[cardIndex];
+            player.cards[cardIndex] = drawnCard;
+            game.discard.push(oldCard);
+        } else {
+            game.discard.push(drawnCard);
+        }
+
+        // Pasar turno
+        game.turn = (game.turn + 1) % game.players.length;
+        io.to(room).emit('syncGameState', { players: game.players, discard: game.discard[game.discard.length - 1], turn: game.turn });
+    });
+
     socket.on('fastDiscard', ({ room, cardIndex }) => {
         let game = rooms[room];
         let player = game.players.find(p => p.id === socket.id);
-        let playerCard = player.cards[cardIndex];
-        let topDiscard = game.discard[game.discard.length - 1];
+        let card = player.cards[cardIndex];
+        let top = game.discard[game.discard.length - 1];
 
-        if (playerCard && playerCard.value === topDiscard.value) {
+        if (card.value === top.value) {
             game.discard.push(player.cards.splice(cardIndex, 1)[0]);
-            io.to(room).emit('syncGameState', { players: game.players, discard: game.discard[game.discard.length - 1] });
         } else {
-            // Penalización: toma una carta y reemplaza la que intentó tirar
-            let penaltyCard = game.deck.pop();
-            player.cards[cardIndex] = penaltyCard;
-            socket.emit('notification', '¡Error! Carta equivocada. Has recibido una penalización.');
-            io.to(room).emit('syncGameState', { players: game.players, discard: game.discard[game.discard.length - 1] });
+            player.cards[cardIndex] = game.deck.pop(); // Penalización
         }
+        io.to(room).emit('syncGameState', { players: game.players, discard: game.discard[game.discard.length - 1], turn: game.turn });
     });
 
-    // Canto de CAMBIO
+    socket.on('swapCards', ({ room, myIndex, targetId, targetIndex }) => {
+        let game = rooms[room];
+        let me = game.players.find(p => p.id === socket.id);
+        let target = game.players.find(p => p.id === targetId);
+        
+        let temp = me.cards[myIndex];
+        me.cards[myIndex] = target.cards[targetIndex];
+        target.cards[targetIndex] = temp;
+
+        io.to(room).emit('syncGameState', { players: game.players, discard: game.discard[game.discard.length - 1], turn: game.turn });
+    });
+
     socket.on('callCambio', (room) => {
         let game = rooms[room];
-        let player = game.players.find(p => p.id === socket.id);
         if (!game.lastRound) {
             game.lastRound = true;
-            player.hasSaidCambio = true;
-            io.to(room).emit('cambioCalled', player.username);
+            io.to(room).emit('cambioCalled', socket.id);
         }
     });
 });
